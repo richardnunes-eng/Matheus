@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Portal Seguro</title>
+  <meta name="description" content="Tela de login segura com sessao persistente para Web App.">
+  <script>window.APP_BASE_URL = "<?= ScriptApp.getService().getUrl() ?>";</script>
+  <?!= include('styles') ?>
+</head>
+<body>
+  <div class="bg-layer" aria-hidden="true"></div>
+
+  <main class="shell">
+    <section class="auth-card" id="auth-card" aria-labelledby="login-title">
+      <header class="auth-header">
+        <p class="kicker">Acesso protegido</p>
+        <h1 id="login-title">Entrar na plataforma</h1>
+        <p class="subtitle" id="auth-subtitle">Use seu email ou usuario para continuar.</p>
+      </header>
+
+      <div class="alert" id="auth-alert" role="status" aria-live="polite"></div>
+
+      <div class="mode-switch" role="tablist" aria-label="Modo de autenticacao">
+        <button type="button" id="tab-login" class="mode-btn active" role="tab" aria-selected="true">Entrar</button>
+        <button type="button" id="tab-register" class="mode-btn" role="tab" aria-selected="false">Criar conta</button>
+      </div>
+
+      <form id="login-form" novalidate>
+        <div class="field">
+          <label for="username">Usuario</label>
+          <div class="input-wrap">
+            <span class="field-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4.42 0-8 2.24-8 5v1h16v-1c0-2.76-3.58-5-8-5z"/></svg>
+            </span>
+            <input
+              id="username"
+              name="username"
+              type="text"
+              autocomplete="username"
+              placeholder="email ou usuario"
+              required
+              minlength="3"
+            >
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="password">Senha</label>
+          <div class="input-wrap">
+            <span class="field-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M17 8h-1V6a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm-6 9.73V19h2v-1.27a2 2 0 1 0-2 0zM10 8V6a2 2 0 0 1 4 0v2z"/></svg>
+            </span>
+            <input
+              id="password"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              placeholder="Sua senha"
+              required
+              minlength="8"
+            >
+            <button type="button" id="toggle-password" class="ghost-btn" aria-label="Mostrar senha">
+              Mostrar
+            </button>
+          </div>
+        </div>
+
+        <div class="options-row">
+          <label class="checkbox">
+            <input type="checkbox" id="remember-me" name="rememberMe">
+            <span>Manter logado</span>
+          </label>
+          <a href="#" id="forgot-password" class="link-btn">Esqueci minha senha</a>
+        </div>
+
+        <button type="submit" id="submit-btn" class="primary-btn">
+          <span class="btn-label">Entrar</span>
+          <span class="btn-loading">Entrando...</span>
+        </button>
+      </form>
+
+      <form id="register-form" novalidate hidden>
+        <div class="field">
+          <label for="register-name">Nome</label>
+          <div class="input-wrap">
+            <span class="field-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4.42 0-8 2.24-8 5v1h16v-1c0-2.76-3.58-5-8-5z"/></svg>
+            </span>
+            <input id="register-name" name="displayName" type="text" autocomplete="name" placeholder="Seu nome">
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="register-username">Email ou usuario</label>
+          <div class="input-wrap">
+            <span class="field-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4.42 0-8 2.24-8 5v1h16v-1c0-2.76-3.58-5-8-5z"/></svg>
+            </span>
+            <input id="register-username" name="username" type="text" autocomplete="username" placeholder="email ou usuario" required minlength="3">
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="register-password">Senha</label>
+          <div class="input-wrap">
+            <span class="field-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M17 8h-1V6a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm-6 9.73V19h2v-1.27a2 2 0 1 0-2 0zM10 8V6a2 2 0 0 1 4 0v2z"/></svg>
+            </span>
+            <input id="register-password" name="password" type="password" autocomplete="new-password" placeholder="Minimo 8 caracteres" required minlength="8">
+            <button type="button" id="toggle-register-password" class="ghost-btn" aria-label="Mostrar senha de cadastro">Mostrar</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="register-confirm-password">Confirmar senha</label>
+          <div class="input-wrap">
+            <span class="field-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M17 8h-1V6a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm-6 9.73V19h2v-1.27a2 2 0 1 0-2 0zM10 8V6a2 2 0 0 1 4 0v2z"/></svg>
+            </span>
+            <input id="register-confirm-password" name="confirmPassword" type="password" autocomplete="new-password" placeholder="Repita a senha" required minlength="8">
+          </div>
+        </div>
+
+        <button type="submit" id="register-submit-btn" class="primary-btn">
+          <span class="btn-label">Criar conta</span>
+          <span class="btn-loading">Criando...</span>
+        </button>
+      </form>
+    </section>
+
+    <section id="dashboard-view" class="dashboard-view" aria-live="polite" hidden>
+      <header class="dash-header">
+        <h2>Dashboard</h2>
+        <button type="button" id="logout-btn" class="ghost-danger">Sair</button>
+      </header>
+      <article class="profile-card">
+        <h3>Perfil carregado</h3>
+        <p id="profile-name">Nome: -</p>
+        <p id="profile-role">Perfil: -</p>
+        <p id="profile-plan">Plano: -</p>
+        <p id="profile-id">ID: -</p>
+      </article>
+    </section>
+  </main>
+
+  <?!= include('AuthClient') ?>
+</body>
+</html>

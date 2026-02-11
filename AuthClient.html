@@ -1,0 +1,441 @@
+<script>
+(function () {
+  "use strict";
+
+  var STORAGE_KEYS = {
+    sessionToken: "auth.sessionToken",
+    refreshToken: "auth.refreshToken",
+    profile: "auth.profile"
+  };
+
+  var SESSION_LIFETIME_MS = 2 * 60 * 60 * 1000;
+  var authState = { isLoading: false, mode: "login" };
+
+  var el = {
+    authCard: document.getElementById("auth-card"),
+    alert: document.getElementById("auth-alert"),
+    subtitle: document.getElementById("auth-subtitle"),
+    tabLogin: document.getElementById("tab-login"),
+    tabRegister: document.getElementById("tab-register"),
+    loginForm: document.getElementById("login-form"),
+    username: document.getElementById("username"),
+    password: document.getElementById("password"),
+    rememberMe: document.getElementById("remember-me"),
+    submitBtn: document.getElementById("submit-btn"),
+    togglePassword: document.getElementById("toggle-password"),
+    forgotPassword: document.getElementById("forgot-password"),
+    registerForm: document.getElementById("register-form"),
+    registerName: document.getElementById("register-name"),
+    registerUsername: document.getElementById("register-username"),
+    registerPassword: document.getElementById("register-password"),
+    registerConfirmPassword: document.getElementById("register-confirm-password"),
+    registerSubmitBtn: document.getElementById("register-submit-btn"),
+    toggleRegisterPassword: document.getElementById("toggle-register-password"),
+    dashboard: document.getElementById("dashboard-view"),
+    profileName: document.getElementById("profile-name"),
+    profileRole: document.getElementById("profile-role"),
+    profilePlan: document.getElementById("profile-plan"),
+    profileId: document.getElementById("profile-id"),
+    logoutBtn: document.getElementById("logout-btn")
+  };
+
+  window.authService = {
+    signIn: signIn,
+    signOut: signOut,
+    restoreSession: restoreSession
+  };
+
+  bindEvents();
+  setMode("login");
+  restoreSession();
+
+  function bindEvents() {
+    el.tabLogin.addEventListener("click", function () { setMode("login"); });
+    el.tabRegister.addEventListener("click", function () { setMode("register"); });
+    el.loginForm.addEventListener("submit", onLoginSubmit);
+    el.registerForm.addEventListener("submit", onRegisterSubmit);
+    el.togglePassword.addEventListener("click", function () {
+      togglePasswordVisibility(el.password, el.togglePassword);
+    });
+    el.toggleRegisterPassword.addEventListener("click", function () {
+      togglePasswordVisibility(el.registerPassword, el.toggleRegisterPassword);
+    });
+    el.forgotPassword.addEventListener("click", onForgotPassword);
+    el.logoutBtn.addEventListener("click", function () {
+      window.authService.signOut();
+    });
+  }
+
+  function setMode(mode) {
+    authState.mode = mode;
+    var isLogin = mode === "login";
+    el.tabLogin.classList.toggle("active", isLogin);
+    el.tabRegister.classList.toggle("active", !isLogin);
+    el.tabLogin.setAttribute("aria-selected", isLogin ? "true" : "false");
+    el.tabRegister.setAttribute("aria-selected", isLogin ? "false" : "true");
+    el.loginForm.hidden = !isLogin;
+    el.registerForm.hidden = isLogin;
+    el.subtitle.textContent = isLogin
+      ? "Use seu email ou usuario para continuar."
+      : "Crie sua conta com senha forte e acesso seguro.";
+    clearAlert();
+  }
+
+  async function onLoginSubmit(event) {
+    event.preventDefault();
+    clearAlert();
+
+    var username = String(el.username.value || "").trim();
+    var password = String(el.password.value || "");
+    var rememberMe = !!el.rememberMe.checked;
+
+    var validationError = validateCredentials(username, password);
+    if (validationError) {
+      showAlert(validationError, "error");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      var payload = await signIn(username, password, rememberMe);
+      if (!payload.ok) {
+        showAlert(payload.message || "Nao foi possivel autenticar.", "error");
+        return;
+      }
+      showAlert("Acesso autorizado. Redirecionando...", "success");
+      await wait(220);
+      goToSystem();
+    } catch (err) {
+      showAlert(normalizeClientError(err), "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onRegisterSubmit(event) {
+    event.preventDefault();
+    clearAlert();
+
+    var displayName = String(el.registerName.value || "").trim();
+    var username = String(el.registerUsername.value || "").trim();
+    var password = String(el.registerPassword.value || "");
+    var confirmPassword = String(el.registerConfirmPassword.value || "");
+
+    var validationError = validateRegistration(displayName, username, password, confirmPassword);
+    if (validationError) {
+      showAlert(validationError, "error");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      var created = await callBackend("authCreateAccount", username, password, displayName, getClientContext());
+      if (!created || !created.ok) {
+        showAlert(extractServerMessage(created, "Nao foi possivel criar a conta."), "error");
+        return;
+      }
+
+      var loginPayload = await signIn(username, password, false);
+      if (!loginPayload.ok) {
+        setMode("login");
+        el.username.value = username;
+        showAlert("Conta criada. Entre para continuar.", "success");
+        return;
+      }
+
+      showAlert("Conta criada com sucesso.", "success");
+      await wait(220);
+      goToSystem();
+    } catch (err) {
+      showAlert(normalizeClientError(err), "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function validateCredentials(username, password) {
+    if (!username || username.length < 3) {
+      return "Informe um usuario valido (minimo de 3 caracteres).";
+    }
+    if (!password || password.length < 8) {
+      return "A senha precisa ter pelo menos 8 caracteres.";
+    }
+    return "";
+  }
+
+  function validateRegistration(displayName, username, password, confirmPassword) {
+    var credError = validateCredentials(username, password);
+    if (credError) {
+      return credError;
+    }
+    if (displayName && displayName.length > 80) {
+      return "O nome deve ter no maximo 80 caracteres.";
+    }
+    if (password !== confirmPassword) {
+      return "As senhas nao conferem.";
+    }
+    return "";
+  }
+
+  async function signIn(username, password, rememberMe) {
+    var response = await callBackend("login", username, password, rememberMe, getClientContext());
+    if (!response || !response.ok) {
+      return { ok: false, message: extractServerMessage(response, "Credenciais invalidas.") };
+    }
+
+    persistTokens(response.sessionToken, response.refreshToken || "", rememberMe);
+    persistProfile(response.userProfile);
+    return response;
+  }
+
+  async function restoreSession() {
+    var sessionToken = readSessionToken();
+    var refreshToken = localStorage.getItem(STORAGE_KEYS.refreshToken) || "";
+    if (!sessionToken && !refreshToken) {
+      showLogin();
+      return;
+    }
+
+    setLoading(true);
+    clearAlert();
+    try {
+      if (sessionToken) {
+        var me = await callBackend("getMe", sessionToken);
+        if (me && me.ok) {
+          persistProfile(me.userProfile);
+          goToSystem();
+          return;
+        }
+      }
+
+      if (refreshToken) {
+        var refreshed = await callBackend("refresh", refreshToken, getClientContext());
+        if (refreshed && refreshed.ok) {
+          persistTokens(refreshed.sessionToken, refreshToken, true);
+          persistProfile(refreshed.userProfile);
+          goToSystem();
+          return;
+        }
+      }
+
+      clearStoredAuth();
+      showLogin();
+    } catch (err) {
+      clearStoredAuth();
+      showLogin();
+      showAlert(normalizeClientError(err), "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function signOut() {
+    var sessionToken = readSessionToken();
+    clearStoredAuth();
+    showLogin();
+    if (!sessionToken) {
+      return;
+    }
+    try {
+      await callBackend("logout", sessionToken);
+    } catch (err) {
+      console.warn("Falha ao invalidar sessao no servidor:", err);
+    }
+  }
+
+  function persistTokens(sessionToken, refreshToken, rememberMe) {
+    if (!sessionToken) {
+      return;
+    }
+    var payload = JSON.stringify({
+      token: sessionToken,
+      savedAt: Date.now(),
+      expiresAt: Date.now() + SESSION_LIFETIME_MS
+    });
+    if (rememberMe) {
+      localStorage.setItem(STORAGE_KEYS.sessionToken, payload);
+      if (refreshToken) {
+        localStorage.setItem(STORAGE_KEYS.refreshToken, refreshToken);
+      }
+      sessionStorage.removeItem(STORAGE_KEYS.sessionToken);
+    } else {
+      sessionStorage.setItem(STORAGE_KEYS.sessionToken, payload);
+      localStorage.removeItem(STORAGE_KEYS.sessionToken);
+      localStorage.removeItem(STORAGE_KEYS.refreshToken);
+    }
+  }
+
+  function readSessionToken() {
+    var raw = sessionStorage.getItem(STORAGE_KEYS.sessionToken) || localStorage.getItem(STORAGE_KEYS.sessionToken);
+    if (!raw) {
+      return "";
+    }
+    try {
+      var parsed = JSON.parse(raw);
+      if (!parsed.expiresAt || parsed.expiresAt < Date.now()) {
+        return "";
+      }
+      return parsed.token || "";
+    } catch (err) {
+      return "";
+    }
+  }
+
+  function clearStoredAuth() {
+    sessionStorage.removeItem(STORAGE_KEYS.sessionToken);
+    localStorage.removeItem(STORAGE_KEYS.sessionToken);
+    localStorage.removeItem(STORAGE_KEYS.refreshToken);
+    localStorage.removeItem(STORAGE_KEYS.profile);
+  }
+
+  function persistProfile(profile) {
+    localStorage.setItem(STORAGE_KEYS.profile, JSON.stringify(profile || {}));
+  }
+
+  function showDashboard(profile) {
+    fillProfile(profile || {});
+    el.authCard.classList.add("leaving");
+    setTimeout(function () {
+      el.authCard.hidden = true;
+      el.dashboard.hidden = false;
+    }, 220);
+  }
+
+  function goToSystem() {
+    var base = window.APP_BASE_URL || window.location.href;
+    var url = new URL(base);
+    url.searchParams.set("app", "1");
+    window.location.assign(url.toString());
+  }
+
+  function showLogin() {
+    el.dashboard.hidden = true;
+    el.authCard.hidden = false;
+    el.authCard.classList.remove("leaving");
+    setMode("login");
+  }
+
+  function fillProfile(profile) {
+    el.profileName.textContent = "Nome: " + (profile.name || profile.username || "-");
+    el.profileRole.textContent = "Perfil: " + (profile.role || "-");
+    el.profilePlan.textContent = "Plano: " + (profile.plan || "-");
+    el.profileId.textContent = "ID: " + (profile.userId || "-");
+  }
+
+  function setLoading(value) {
+    authState.isLoading = value;
+    disableForms(value);
+    el.submitBtn.classList.toggle("loading", value && authState.mode === "login");
+    el.registerSubmitBtn.classList.toggle("loading", value && authState.mode === "register");
+    el.submitBtn.disabled = value;
+    el.registerSubmitBtn.disabled = value;
+  }
+
+  function disableForms(disabled) {
+    el.username.disabled = disabled;
+    el.password.disabled = disabled;
+    el.rememberMe.disabled = disabled;
+    el.togglePassword.disabled = disabled;
+    el.tabLogin.disabled = disabled;
+    el.tabRegister.disabled = disabled;
+    el.forgotPassword.disabled = disabled;
+    el.registerName.disabled = disabled;
+    el.registerUsername.disabled = disabled;
+    el.registerPassword.disabled = disabled;
+    el.registerConfirmPassword.disabled = disabled;
+    el.toggleRegisterPassword.disabled = disabled;
+  }
+
+  function togglePasswordVisibility(input, trigger) {
+    var isPassword = input.type === "password";
+    input.type = isPassword ? "text" : "password";
+    trigger.textContent = isPassword ? "Ocultar" : "Mostrar";
+  }
+
+  function onForgotPassword(event) {
+    event.preventDefault();
+    showAlert("Recuperacao de senha: implemente envio de token por email.", "error");
+  }
+
+  function showAlert(message, type) {
+    el.alert.textContent = message || "";
+    el.alert.classList.remove("success");
+    if (type === "success") {
+      el.alert.classList.add("success");
+    }
+  }
+
+  function clearAlert() {
+    showAlert("", "none");
+  }
+
+  function extractServerMessage(payload, fallback) {
+    if (!payload) {
+      return fallback;
+    }
+    var msg = payload.message || fallback;
+    if (payload.extra && payload.extra.detail) {
+      return msg + " (" + payload.extra.detail + ")";
+    }
+    return msg;
+  }
+
+  function normalizeClientError(err) {
+    if (!err) {
+      return "Erro inesperado no processo de autenticacao.";
+    }
+    if (typeof err === "string") {
+      return err;
+    }
+    return err.message || "Erro inesperado no processo de autenticacao.";
+  }
+
+  function getClientContext() {
+    return {
+      userAgent: navigator.userAgent || "unknown",
+      ip: ""
+    };
+  }
+
+  function wait(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  function callBackend(functionName) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    if (window.google && google.script && google.script.run) {
+      return withTimeout(runGasFunction(functionName, args), 30000, "Tempo limite excedido no servidor.");
+    }
+    return Promise.resolve({ ok: false, message: "Backend Apps Script indisponivel." });
+  }
+
+  function runGasFunction(functionName, args) {
+    return new Promise(function (resolve, reject) {
+      var runner = google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(reject);
+      if (typeof runner[functionName] !== "function") {
+        reject(new Error("Funcao backend nao encontrada: " + functionName));
+        return;
+      }
+      runner[functionName].apply(runner, args);
+    });
+  }
+
+  function withTimeout(promise, timeoutMs, message) {
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
+        reject(new Error(message || "Timeout"));
+      }, timeoutMs);
+
+      promise.then(function (value) {
+        clearTimeout(timer);
+        resolve(value);
+      }).catch(function (err) {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+})();
+</script>

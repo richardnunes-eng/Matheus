@@ -1,0 +1,153 @@
+<script>
+(function () {
+  "use strict";
+
+  var STORAGE_KEYS = {
+    sessionToken: "auth.sessionToken",
+    refreshToken: "auth.refreshToken",
+    profile: "auth.profile"
+  };
+
+  initAuthGate();
+
+  function initAuthGate() {
+    var sessionToken = readSessionToken();
+    if (!sessionToken) {
+      redirectToLogin();
+      return;
+    }
+
+    google.script.run
+      .withSuccessHandler(function (payload) {
+        if (!payload || !payload.ok) {
+          tryRefreshOrExit();
+          return;
+        }
+        persistProfile(payload.userProfile || {});
+        applyProfile(payload.userProfile || {});
+        injectLogoutButton();
+      })
+      .withFailureHandler(function () {
+        tryRefreshOrExit();
+      })
+      .getMe(sessionToken);
+  }
+
+  function tryRefreshOrExit() {
+    var refreshToken = localStorage.getItem(STORAGE_KEYS.refreshToken) || "";
+    if (!refreshToken) {
+      clearAuthStorage();
+      redirectToLogin();
+      return;
+    }
+
+    google.script.run
+      .withSuccessHandler(function (payload) {
+        if (!payload || !payload.ok || !payload.sessionToken) {
+          clearAuthStorage();
+          redirectToLogin();
+          return;
+        }
+
+        localStorage.setItem(STORAGE_KEYS.sessionToken, JSON.stringify({
+          token: payload.sessionToken,
+          savedAt: Date.now(),
+          expiresAt: Date.now() + (2 * 60 * 60 * 1000)
+        }));
+        persistProfile(payload.userProfile || {});
+        applyProfile(payload.userProfile || {});
+        injectLogoutButton();
+      })
+      .withFailureHandler(function () {
+        clearAuthStorage();
+        redirectToLogin();
+      })
+      .refresh(refreshToken, { userAgent: navigator.userAgent || "unknown", ip: "" });
+  }
+
+  function injectLogoutButton() {
+    var footer = document.querySelector(".sidebar-footer");
+    if (!footer || document.getElementById("auth-logout-btn")) {
+      return;
+    }
+
+    var btn = document.createElement("button");
+    btn.id = "auth-logout-btn";
+    btn.textContent = "Sair";
+    btn.className = "auth-logout-btn";
+
+    btn.addEventListener("click", function () {
+      var token = readSessionToken();
+      clearAuthStorage();
+      if (!token) {
+        redirectToLogin();
+        return;
+      }
+      google.script.run
+        .withSuccessHandler(function () { redirectToLogin(); })
+        .withFailureHandler(function () { redirectToLogin(); })
+        .logout(token);
+    });
+
+    footer.appendChild(btn);
+  }
+
+  function applyProfile(profile) {
+    var emailEl = document.getElementById("user-email");
+    if (emailEl) {
+      var name = profile.name || profile.username || "Usuario";
+      var userRef = profile.username || profile.email || "";
+      emailEl.innerHTML =
+        '<div class="profile-line">' +
+        '<span class="profile-avatar" aria-hidden="true">&#128100;</span>' +
+        '<span class="profile-name" title="' + escapeHtml(name) + '">' + escapeHtml(name) + "</span>" +
+        "</div>" +
+        '<div class="profile-sub" title="' + escapeHtml(userRef) + '">' + escapeHtml(userRef || "Sessao ativa") + "</div>";
+    }
+    window.AUTH_PROFILE = profile;
+  }
+
+  function escapeHtml(value) {
+    return String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function readSessionToken() {
+    var raw = sessionStorage.getItem(STORAGE_KEYS.sessionToken) || localStorage.getItem(STORAGE_KEYS.sessionToken);
+    if (!raw) {
+      return "";
+    }
+    try {
+      var parsed = JSON.parse(raw);
+      if (!parsed.token || !parsed.expiresAt || parsed.expiresAt < Date.now()) {
+        return "";
+      }
+      return parsed.token;
+    } catch (err) {
+      return "";
+    }
+  }
+
+  function persistProfile(profile) {
+    localStorage.setItem(STORAGE_KEYS.profile, JSON.stringify(profile || {}));
+  }
+
+  function clearAuthStorage() {
+    sessionStorage.removeItem(STORAGE_KEYS.sessionToken);
+    localStorage.removeItem(STORAGE_KEYS.sessionToken);
+    localStorage.removeItem(STORAGE_KEYS.refreshToken);
+    localStorage.removeItem(STORAGE_KEYS.profile);
+  }
+
+  function redirectToLogin() {
+    var base = window.APP_BASE_URL || window.location.href;
+    var url = new URL(base);
+    url.searchParams.delete("app");
+    window.location.replace(url.toString());
+  }
+})();
+</script>

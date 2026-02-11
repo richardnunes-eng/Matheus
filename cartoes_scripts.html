@@ -1,0 +1,1208 @@
+<script>
+// =============================================================================
+// CARTÕES DE CRÉDITO — Frontend SPA
+// =============================================================================
+// NAMESPACE: App (singleton)
+// Módulos internos: Store, Api, Render, Toast, Modal, Poll
+// Sem dependências externas (vanilla JS puro, compatível com Apps Script sandbox)
+// =============================================================================
+
+(function () {
+  'use strict';
+
+  // ==========================================================================
+  // CONSTANTES
+  // ==========================================================================
+  var MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho',
+               'Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+
+  var MESES_CURTO = ['Jan','Fev','Mar','Abr','Mai','Jun',
+                     'Jul','Ago','Set','Out','Nov','Dez'];
+
+  var POLL_INTERVAL_MS      = 20000; // 20s polling quando visível
+  var POLL_BACKOFF_FACTOR   = 1.5;
+  var POLL_MAX_INTERVAL_MS  = 120000;
+  var DEBOUNCE_SEARCH_MS    = 250;
+
+  // ==========================================================================
+  // STORE — Estado centralizado (sem mutação direta fora do Store)
+  // ==========================================================================
+  var Store = (function () {
+    var _state = {
+      cartoes:       [],      // lista completa (enriquecida pelo server)
+      cartaoDetalhe: null,    // cartão atual aberto no detalhe
+      faturas:       [],      // faturas do cartão em detalhe
+      kpis:          null,
+      etag:          null,
+      view:          'lista', // 'lista' | 'detalhe'
+      filterStatus:  'ativos',
+      searchQuery:   '',
+      sortBy:        'pct_desc',
+      loading:       false,
+      syncing:       false,
+      debugMode:     false
+    };
+
+    // Subscrições simples
+    var _listeners = [];
+
+    function get()            { return _state; }
+    function getCartoes()     { return _state.cartoes; }
+    function getEtag()        { return _state.etag; }
+
+    function set(patch) {
+      Object.assign(_state, patch);
+      _listeners.forEach(function(fn) { try { fn(_state); } catch(e) {} });
+    }
+
+    function subscribe(fn) { _listeners.push(fn); }
+
+    /** Atualiza um cartão na lista por id (optimistic). */
+    function upsertCartao(cartao) {
+      var list = _state.cartoes.slice();
+      var idx  = list.findIndex(function(c) { return c.id === cartao.id; });
+      if (idx >= 0) { list[idx] = cartao; }
+      else          { list.unshift(cartao); }
+      set({ cartoes: list });
+    }
+
+    /** Remove cartão da lista (para arquivar optimistically). */
+    function removeCartao(id) {
+      set({ cartoes: _state.cartoes.filter(function(c) { return c.id !== id; }) });
+    }
+
+    /** Atualiza uma fatura no estado de detalhe. */
+    function upsertFatura(fatura) {
+      var list = (_state.faturas || []).slice();
+      var idx  = list.findIndex(function(f) { return f.id_fatura === fatura.id_fatura; });
+      if (idx >= 0) { list[idx] = fatura; }
+      else          { list.unshift(fatura); }
+      set({ faturas: list });
+    }
+
+    return { get, getCartoes, getEtag, set, subscribe, upsertCartao, removeCartao, upsertFatura };
+  })();
+
+  // ==========================================================================
+  // UTILS
+  // ==========================================================================
+  var Utils = {
+    /** Formata valor em R$ */
+    brl: function(v) {
+      v = parseFloat(v) || 0;
+      return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+    },
+
+    /** Escapa HTML (segurança) */
+    esc: function(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;')
+        .replace(/'/g,'&#39;');
+    },
+
+    /** Cor escurecida (para gradiente) — simples */
+    darken: function(hex, amount) {
+      amount = amount || 30;
+      var r = parseInt(hex.slice(1,3),16);
+      var g = parseInt(hex.slice(3,5),16);
+      var b = parseInt(hex.slice(5,7),16);
+      r = Math.max(0, r - amount);
+      g = Math.max(0, g - amount);
+      b = Math.max(0, b - amount);
+      return '#' + [r,g,b].map(function(x){ return x.toString(16).padStart(2,'0'); }).join('');
+    },
+
+    /** Classe de pct uso */
+    pctClass: function(pct) {
+      if (pct >= 80) return 'danger';
+      if (pct >= 50) return 'warn';
+      return 'ok';
+    },
+
+    /** SVG da bandeira */
+    bandeiraSvg: function(bandeira) {
+      var b = String(bandeira || '').toLowerCase();
+      // Mastercard: dois círculos sobrepostos
+      if (b === 'master') {
+        return '<svg width="40" height="26" viewBox="0 0 40 26" fill="none">'
+          + '<circle cx="15" cy="13" r="12" fill="#EB001B" opacity=".9"/>'
+          + '<circle cx="25" cy="13" r="12" fill="#F79E1B" opacity=".9"/>'
+          + '<path d="M20 5.1a12 12 0 0 1 0 15.8A12 12 0 0 1 20 5.1z" fill="#FF5F00" opacity=".9"/>'
+          + '</svg>';
+      }
+      // Visa: texto simples estilizado
+      if (b === 'visa') {
+        return '<svg width="48" height="16" viewBox="0 0 48 16" fill="none">'
+          + '<text x="0" y="13" font-family="Arial" font-size="16" font-weight="800" fill="white" letter-spacing="1">VISA</text>'
+          + '</svg>';
+      }
+      // Amex: A simples
+      if (b === 'amex') {
+        return '<svg width="36" height="24" viewBox="0 0 36 24" fill="none">'
+          + '<rect width="36" height="24" rx="4" fill="rgba(255,255,255,.2)"/>'
+          + '<text x="7" y="17" font-family="Arial" font-size="11" font-weight="800" fill="white">AMEX</text>'
+          + '</svg>';
+      }
+      // Elo
+      if (b === 'elo') {
+        return '<svg width="36" height="24" viewBox="0 0 36 24" fill="none">'
+          + '<rect width="36" height="24" rx="4" fill="rgba(255,255,255,.2)"/>'
+          + '<text x="9" y="17" font-family="Arial" font-size="12" font-weight="800" fill="#FFD700">elo</text>'
+          + '</svg>';
+      }
+      // Outro / padrão
+      return '<svg width="32" height="22" viewBox="0 0 32 22" fill="none">'
+        + '<rect width="32" height="22" rx="3" fill="rgba(255,255,255,.2)"/>'
+        + '<circle cx="12" cy="11" r="7" fill="rgba(255,255,255,.3)"/>'
+        + '<circle cx="20" cy="11" r="7" fill="rgba(255,255,255,.2)"/>'
+        + '</svg>';
+    },
+
+    /** Hoje em ISO (YYYY-MM-DD) */
+    hoje: function() {
+      var d = new Date();
+      return d.getFullYear() + '-' +
+        String(d.getMonth()+1).padStart(2,'0') + '-' +
+        String(d.getDate()).padStart(2,'0');
+    },
+
+    /** Debounce simples */
+    debounce: function(fn, ms) {
+      var t;
+      return function() {
+        var args = arguments;
+        clearTimeout(t);
+        t = setTimeout(function() { fn.apply(null, args); }, ms);
+      };
+    },
+
+    /** Mes/ano label */
+    mesAnoLabel: function(mes, ano) {
+      return MESES_CURTO[(parseInt(mes)||1) - 1] + '/' + ano;
+    }
+  };
+
+  // ==========================================================================
+  // API CLIENT — Wrapper de google.script.run com Promise
+  // ==========================================================================
+  var Api = (function () {
+
+    /** Chama uma função server-side, retorna Promise com { ok, data/error, meta }. */
+    function call(fnName, args) {
+      return new Promise(function(resolve) {
+        var runner = google.script.run
+          .withSuccessHandler(function(raw) {
+            try {
+              var res = typeof raw === 'string' ? JSON.parse(raw) : raw;
+              _updateDebug(fnName, res && res.meta && res.meta.latencyMs);
+              resolve(res);
+            } catch(e) {
+              resolve({ ok: false, error: { code: 'PARSE_ERROR', message: 'Resposta inválida do servidor' } });
+            }
+          })
+          .withFailureHandler(function(err) {
+            var msg = err && err.message ? err.message : String(err);
+            resolve({ ok: false, error: { code: 'TRANSPORT', message: msg } });
+          });
+
+        // Chamar a função com os argumentos corretos
+        if (!args || args.length === 0)       { runner[fnName](); }
+        else if (args.length === 1)            { runner[fnName](args[0]); }
+        else if (args.length === 2)            { runner[fnName](args[0], args[1]); }
+        else if (args.length === 3)            { runner[fnName](args[0], args[1], args[2]); }
+        else                                   { runner[fnName].apply(runner, args); }
+      });
+    }
+
+    function _updateDebug(fn, latency) {
+      if (!Store.get().debugMode) return;
+      var el = document.getElementById('dbgText');
+      if (el) el.textContent = fn + ' — ' + (latency || '?') + 'ms @ ' + new Date().toLocaleTimeString('pt-BR');
+    }
+
+    return {
+      bootstrap:       function()            { return call('bootstrap', []); },
+      listCartoes:     function(etag)        { return call('listCartoes', [etag]); },
+      getDetalhe:      function(id)          { return call('getCartaoDetalhe', [id]); },
+      saveCartao:      function(payload)     { return call('saveCartao', [JSON.stringify(payload)]); },
+      archiveCartao:   function(id, ativo)   { return call('archiveCartao', [id, ativo]); },
+      gerarFatura:     function(id, ano, mes){ return call('gerarFaturaMes', [id, ano, mes]); },
+      pagarFatura:     function(id, dt)      { return call('pagarFatura', [id, dt]); },
+      pagarFaturaAtualSaldo: function(idCartao, ano, mes, dt, contaId, valor) { return call('pagarFaturaAtualSaldo', [idCartao, ano, mes, dt, contaId, valor]); },
+      sync:            function(etag)        { return call('syncCartoes', [etag]); }
+    };
+  })();
+
+  // ==========================================================================
+  // TOAST
+  // ==========================================================================
+  var Toast = (function () {
+    var container;
+    function _container() {
+      if (!container) container = document.getElementById('toastContainer');
+      return container;
+    }
+
+    function show(msg, type, duration) {
+      type = type || 'info';
+      duration = duration || 3500;
+
+      var icons = {
+        success: '<svg class="toast-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+        error:   '<svg class="toast-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+        warn:    '<svg class="toast-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+        info:    '<svg class="toast-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
+      };
+
+      var el = document.createElement('div');
+      el.className = 'toast ' + type;
+      el.innerHTML = (icons[type] || icons.info) + '<span>' + Utils.esc(msg) + '</span>';
+
+      var c = _container();
+      c.appendChild(el);
+
+      setTimeout(function () {
+        el.classList.add('exit');
+        setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 280);
+      }, duration);
+    }
+
+    return { show };
+  })();
+
+  // ==========================================================================
+  // MODAL
+  // ==========================================================================
+  var Modal = (function () {
+    var backdrop, content;
+    var _onClose = null;
+
+    function _els() {
+      if (!backdrop) backdrop = document.getElementById('modalBackdrop');
+      if (!content)  content  = document.getElementById('modalContent');
+    }
+
+    function open(html, onCloseFn) {
+      _els();
+      content.innerHTML = html;
+      backdrop.style.display = 'flex';
+      _onClose = onCloseFn || null;
+      document.body.style.overflow = 'hidden';
+      // Foco no primeiro input
+      requestAnimationFrame(function() {
+        var first = content.querySelector('input:not([type="hidden"]),select,textarea');
+        if (first) first.focus();
+      });
+    }
+
+    function close() {
+      _els();
+      backdrop.style.display = 'none';
+      content.innerHTML = '';
+      document.body.style.overflow = '';
+      if (_onClose) { try { _onClose(); } catch(e) {} _onClose = null; }
+    }
+
+    function closeOnBackdrop(e) {
+      if (e && e.target === backdrop) close();
+    }
+
+    return { open, close, closeOnBackdrop };
+  })();
+
+  // ==========================================================================
+  // RENDER — Funções puras de geração de HTML
+  // ==========================================================================
+  var Render = (function () {
+
+    /** Renderiza a view de lista no #mainContent */
+    function cartoesView() {
+      var tpl = document.getElementById('tpl-cartoes-view');
+      if (!tpl) return;
+      var main = document.getElementById('mainContent');
+      main.innerHTML = tpl.innerHTML;
+      // Aplica estado inicial
+      var s = Store.get();
+      updateBadges(s.cartoes);
+      updateKpiRow(s.cartoes);
+      cartoesList();
+    }
+
+    /** Filtra/ordena e renderiza a lista de cartões */
+    function cartoesList() {
+      var s      = Store.get();
+      var grid   = document.getElementById('cardsGrid');
+      var empty  = document.getElementById('emptyState');
+      if (!grid) return;
+
+      var list = _filterAndSort(s.cartoes, s.filterStatus, s.searchQuery, s.sortBy);
+
+      if (!list.length) {
+        grid.innerHTML = '';
+        if (empty) {
+          empty.style.display = 'flex';
+          var title = document.getElementById('emptyTitle');
+          var desc  = document.getElementById('emptyDesc');
+          if (s.searchQuery) {
+            if (title) title.textContent = 'Nenhum resultado encontrado';
+            if (desc)  desc.textContent  = 'Tente outro nome, banco ou bandeira.';
+          } else if (s.filterStatus === 'arquivados') {
+            if (title) title.textContent = 'Nenhum cartão arquivado';
+            if (desc)  desc.textContent  = 'Cartões arquivados aparecerão aqui.';
+          } else {
+            if (title) title.textContent = 'Nenhum cartão ativo';
+            if (desc)  desc.textContent  = 'Adicione seu primeiro cartão clicando no "+"';
+          }
+        }
+        return;
+      }
+
+      if (empty) empty.style.display = 'none';
+
+      // Usar DocumentFragment para evitar reflow excessivo
+      var frag = document.createDocumentFragment();
+      list.forEach(function(c) {
+        var el = document.createElement('div');
+        el.innerHTML = _cartaoCardHtml(c);
+        frag.appendChild(el.firstElementChild);
+      });
+      grid.innerHTML = '';
+      grid.appendChild(frag);
+    }
+
+    function _filterAndSort(list, status, query, sort) {
+      var q = (query || '').toLowerCase().trim();
+      var filtered = list.filter(function(c) {
+        var statusOk = status === 'arquivados' ? !c.ativo : c.ativo;
+        if (!statusOk) return false;
+        if (q) {
+          var search = (c.nome + ' ' + c.emissor + ' ' + c.bandeira).toLowerCase();
+          return search.indexOf(q) >= 0;
+        }
+        return true;
+      });
+
+      filtered.sort(function(a, b) {
+        if (sort === 'pct_desc')  return b.pct_uso - a.pct_uso;
+        if (sort === 'venc_asc') {
+          return String(a.prox_vencimento).localeCompare(String(b.prox_vencimento));
+        }
+        if (sort === 'nome_asc') return String(a.nome).localeCompare(String(b.nome), 'pt-BR');
+        return 0;
+      });
+
+      return filtered;
+    }
+
+    function _cartaoCardHtml(c) {
+      var tpl = document.getElementById('tpl-cartao-card');
+      if (!tpl) return '';
+
+      var cor      = c.cor || '#5B5FEF';
+      var corDark  = Utils.darken(cor, 35);
+      var pctCls   = Utils.pctClass(c.pct_uso);
+      var ult4Disp = c.ult4 ? ('•••• •••• •••• ' + c.ult4) : '•••• •••• •••• ••••';
+      var isAtivo  = c.ativo;
+
+      // Alertas
+      var alertsHtml = '';
+      if (c.alerta_uso) {
+        alertsHtml += '<div class="alert-chip warn">'
+          + '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>'
+          + 'Uso alto: ' + c.pct_uso + '%</div>';
+      }
+      if (c.alerta_vencimento) {
+        alertsHtml += '<div class="alert-chip danger">'
+          + '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
+          + 'Vence em ' + c.dias_para_vencimento + ' dia(s)</div>';
+      }
+
+      var archiveIcon = isAtivo
+        ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>'
+        : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>';
+
+      var html = tpl.innerHTML
+        .replace(/{id}/g,            Utils.esc(c.id))
+        .replace(/{cor}/g,           cor)
+        .replace(/{corDark}/g,       corDark)
+        .replace(/{nome}/g,          Utils.esc(c.nome))
+        .replace(/{emissor}/g,       Utils.esc(c.emissor || ''))
+        .replace(/{bandeiraSvg}/g,   Utils.bandeiraSvg(c.bandeira))
+        .replace(/{ult4Display}/g,   Utils.esc(ult4Disp))
+        .replace(/{limUsadoFmt}/g,   Utils.esc(Utils.brl(c.limite_usado)))
+        .replace(/{limDispFmt}/g,    Utils.esc(Utils.brl(c.limite_disponivel)))
+        .replace(/{limTotalFmt}/g,   Utils.esc(Utils.brl(c.limite_total)))
+        .replace(/{pct_uso}/g,       c.pct_uso)
+        .replace(/{pctClass}/g,      pctCls)
+        .replace(/{prox_fechamento}/g, Utils.esc(c.prox_fechamento))
+        .replace(/{prox_vencimento}/g, Utils.esc(c.prox_vencimento))
+        .replace(/{melhor_dia_compra}/g, c.melhor_dia_compra)
+        .replace(/{alertClass}/g,    (c.alerta_uso || c.alerta_vencimento) ? 'alerta-alto' : '')
+        .replace(/{alertVencClass}/g, c.alerta_vencimento ? 'alerta-venc' : '')
+        .replace(/{alertsHtml}/g,    alertsHtml)
+        .replace(/{archiveIcon}/g,   archiveIcon)
+        .replace(/{archiveLabel}/g,  isAtivo ? 'Arquivar' : 'Reativar')
+        .replace(/{archiveBtnClass}/g, isAtivo ? 'archive' : 'unarchive')
+        .replace(/{ativoInvert}/g,   !isAtivo);
+
+      // Adiciona classe arquivado ao wrapper
+      if (!isAtivo) html = html.replace('class="cartao-card ', 'class="cartao-card arquivado ');
+
+      return html;
+    }
+
+    /** Atualiza badges de contagem nas tabs */
+    function updateBadges(cartoes) {
+      var ativos     = cartoes.filter(function(c) { return c.ativo; }).length;
+      var arquivados = cartoes.filter(function(c) { return !c.ativo; }).length;
+      var ba = document.getElementById('badgeAtivos');
+      var bb = document.getElementById('badgeArquivados');
+      if (ba) ba.textContent = ativos;
+      if (bb) bb.textContent = arquivados;
+    }
+
+    /** Atualiza KPI row com totais */
+    function updateKpiRow(cartoes) {
+      var ativos = cartoes.filter(function(c) { return c.ativo; });
+      if (!ativos.length) {
+        var kr = document.getElementById('kpiRow');
+        if (kr) kr.style.display = 'none';
+        return;
+      }
+      var totTotal = ativos.reduce(function(s,c) { return s + (c.limite_total  || 0); }, 0);
+      var totUsado = ativos.reduce(function(s,c) { return s + (c.limite_usado  || 0); }, 0);
+      var totDisp  = ativos.reduce(function(s,c) { return s + (c.limite_disponivel || 0); }, 0);
+
+      var kr = document.getElementById('kpiRow');
+      if (kr) kr.style.display = 'flex';
+      var a = document.getElementById('kpiLimTotal');
+      var b = document.getElementById('kpiLimUsado');
+      var c = document.getElementById('kpiLimDisp');
+      if (a) a.textContent = Utils.brl(totTotal);
+      if (b) b.textContent = Utils.brl(totUsado);
+      if (c) c.textContent = Utils.brl(totDisp);
+    }
+
+    /** Renderiza a view de detalhe */
+    function detalheView(cartao, faturas, kpis) {
+      var tpl = document.getElementById('tpl-detalhe-view');
+      if (!tpl) return;
+
+      var cor      = cartao.cor || '#5B5FEF';
+      var corDark  = Utils.darken(cor, 35);
+      var pctCls   = Utils.pctClass(cartao.pct_uso);
+      var ult4Full = cartao.ult4 ? ('•••• •••• •••• ' + cartao.ult4) : '•••• •••• •••• ••••';
+      var isAtivo  = cartao.ativo;
+
+      // Alertas
+      var alertasHtml = '';
+      if (cartao.alerta_uso) {
+        alertasHtml += '<div class="alerta-banner warn">'
+          + '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
+          + 'Uso do limite acima de 80% — considere pagar parte da fatura.</div>';
+      }
+      if (cartao.alerta_vencimento) {
+        alertasHtml += '<div class="alerta-banner danger">'
+          + '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
+          + 'Vencimento em <strong>' + cartao.dias_para_vencimento + ' dia(s)</strong> — ' + cartao.prox_vencimento + '</div>';
+      }
+
+      var diasVencTxt = cartao.dias_para_vencimento === 0
+        ? 'Vence hoje!'
+        : 'em ' + cartao.dias_para_vencimento + ' dia(s)';
+
+      var archiveIcon = isAtivo
+        ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>'
+        : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>';
+
+      // Faturas HTML
+      var faturasHtml = _faturasListHtml(faturas || []);
+
+      var html = tpl.innerHTML
+        .replace(/{id}/g,            Utils.esc(cartao.id))
+        .replace(/{cor}/g,           cor)
+        .replace(/{corDark}/g,       corDark)
+        .replace(/{nome}/g,          Utils.esc(cartao.nome))
+        .replace(/{emissor}/g,       Utils.esc(cartao.emissor || ''))
+        .replace(/{bandeiraSvg}/g,   Utils.bandeiraSvg(cartao.bandeira))
+        .replace(/{ult4DisplayFull}/g, Utils.esc(ult4Full))
+        .replace(/{limTotalFmt}/g,   Utils.esc(Utils.brl(cartao.limite_total)))
+        .replace(/{limUsadoFmt}/g,   Utils.esc(Utils.brl(cartao.limite_usado)))
+        .replace(/{limDispFmt}/g,    Utils.esc(Utils.brl(cartao.limite_disponivel)))
+        .replace(/{pct_uso}/g,       cartao.pct_uso)
+        .replace(/{pctClass}/g,      pctCls)
+        .replace(/{prox_fechamento}/g, Utils.esc(cartao.prox_fechamento))
+        .replace(/{prox_vencimento}/g, Utils.esc(cartao.prox_vencimento))
+        .replace(/{melhor_dia_compra}/g, cartao.melhor_dia_compra)
+        .replace(/{alertVencClass}/g,  cartao.alerta_vencimento ? 'alerta-venc' : '')
+        .replace(/{alertasHtml}/g,   alertasHtml)
+        .replace(/{diasParaVencTxt}/g, Utils.esc(diasVencTxt))
+        .replace(/{faturasHtml}/g,   faturasHtml)
+        .replace(/{archiveIcon}/g,   archiveIcon)
+        .replace(/{archiveLabel}/g,  isAtivo ? 'Arquivar' : 'Reativar')
+        .replace(/{ativoInvert}/g,   !isAtivo);
+
+      document.getElementById('mainContent').innerHTML = html;
+    }
+
+    function _faturasListHtml(faturas) {
+      if (!faturas.length) {
+        return '<div class="faturas-empty">Nenhuma fatura registrada. Clique em "Nova fatura" para criar.</div>';
+      }
+      var tpl = document.getElementById('tpl-fatura-item');
+      if (!tpl) return '';
+
+      return faturas.map(function(f) {
+        var statusLower = String(f.status || 'aberta').toLowerCase();
+        var isParcial = statusLower === 'parcial';
+        var isPaid = statusLower === 'paga' || statusLower === 'pago' || statusLower === 'paid';
+        var mesAno      = Utils.mesAnoLabel(f.mes_ref, f.ano_ref);
+        var pagarBtn    = (!isPaid)
+          ? '<button class="btn-pagar-fatura" onclick="event.stopPropagation();App.openPagarFatura(\'' + Utils.esc(f.id_fatura) + '\')" aria-label="'+(isParcial ? 'Pagar restante' : 'Marcar como paga')+'">'+(isParcial ? 'Pagar restante' : 'Pagar')+'</button>'
+          : '';
+
+        // Valor exibido: pendente se parcial/aberta, total se paga
+        var valorTotal = parseFloat(f.valor_total || 0);
+        var valorPago = parseFloat(f.valor_pago || 0);
+        var valorPendente = parseFloat(f.valor_mes || f.valor || 0);
+        var valorExibicao = isPaid ? (valorTotal > 0 ? valorTotal : parseFloat(f.valor || 0)) : valorPendente;
+
+        // Info adicional para pagamento parcial
+        var extraInfo = '';
+        if ((isParcial || (!isPaid && valorPago > 0)) && valorTotal > 0) {
+          var pctPago = Math.min(100, Math.round((valorPago / valorTotal) * 100));
+          extraInfo = '<div style="font-size:.7rem;color:#fbbf24;margin-top:3px">Pago: ' + Utils.brl(valorPago) + ' de ' + Utils.brl(valorTotal) + ' (' + pctPago + '%)</div>'
+            + '<div style="font-size:.68rem;color:#f87171;font-weight:600">Pendente: ' + Utils.brl(valorPendente) + '</div>';
+        }
+
+        return tpl.innerHTML
+          .replace(/{id_fatura}/g,    Utils.esc(f.id_fatura))
+          .replace(/{mesAno}/g,       Utils.esc(mesAno))
+          .replace(/{dtInicio}/g,     Utils.esc(f.dt_inicio  || '\u2014'))
+          .replace(/{dtFim}/g,        Utils.esc(f.dt_fim     || '\u2014'))
+          .replace(/{dtVencimento}/g, Utils.esc(f.dt_vencimento || '\u2014'))
+          .replace(/{valorFmt}/g,     Utils.esc(Utils.brl(valorExibicao)) + extraInfo)
+          .replace(/{status}/g,       Utils.esc(isParcial ? 'Parcial' : f.status))
+          .replace(/{statusClass}/g,  statusLower)
+          .replace(/{pagarBtn}/g,     pagarBtn);
+      }).join('');
+    }
+
+    /** Modal de criar/editar cartão */
+    function modalCartao(cartao) {
+      var tpl = document.getElementById('tpl-modal-cartao');
+      if (!tpl) return '';
+      var c   = cartao || {};
+      var cor = c.cor || '#5B5FEF';
+      var CORES = ['#5B5FEF','#820AD1','#FF7A00','#0EA47A','#E53E3E','#1A73E8','#2D3748'];
+
+      var html = tpl.innerHTML
+        .replace(/{modalTitulo}/g, c.id ? 'Editar cartão' : 'Novo cartão')
+        .replace(/{id}/g,           Utils.esc(c.id      || ''))
+        .replace(/{version}/g,      c.version || 1)
+        .replace(/{nome}/g,         Utils.esc(c.nome    || ''))
+        .replace(/{emissor}/g,      Utils.esc(c.emissor || ''))
+        .replace(/{ult4}/g,         Utils.esc(c.ult4    || ''))
+        .replace(/{limite_total}/g, c.limite_total  || '')
+        .replace(/{limite_usado}/g, c.limite_usado  || '')
+        .replace(/{dia_fechamento}/g, c.dia_fechamento || '')
+        .replace(/{dia_vencimento}/g, c.dia_vencimento || '')
+        .replace(/{cor}/g,          cor)
+        .replace(/{btnLabel}/g,     c.id ? 'Salvar alterações' : 'Adicionar cartão')
+        .replace(/{selVisa}/g,   c.bandeira === 'Visa'   ? 'selected' : '')
+        .replace(/{selMaster}/g, c.bandeira === 'Master' ? 'selected' : '')
+        .replace(/{selAmex}/g,   c.bandeira === 'Amex'   ? 'selected' : '')
+        .replace(/{selElo}/g,    c.bandeira === 'Elo'    ? 'selected' : '')
+        .replace(/{selOutro}/g,  c.bandeira === 'Outro'  ? 'selected' : '');
+
+      // Marcar swatches selecionadas
+      CORES.forEach(function(c2, i) {
+        html = html.replace('{selCor' + (i+1) + '}', cor === c2 ? 'selected' : '');
+      });
+
+      return html;
+    }
+
+    return { cartoesView, cartoesList, detalheView, updateBadges, updateKpiRow, modalCartao };
+  })();
+
+  // ==========================================================================
+  // POLLING — Sincronização "real-time" com backoff
+  // ==========================================================================
+  var Poll = (function () {
+    var _timer    = null;
+    var _interval = POLL_INTERVAL_MS;
+    var _paused   = false;
+
+    // Pausa quando aba oculta
+    document.addEventListener('visibilitychange', function() {
+      _paused = document.hidden;
+      if (!_paused && !_timer) { _schedule(); }
+    });
+
+    function start() {
+      _interval = POLL_INTERVAL_MS;
+      _schedule();
+    }
+
+    function stop() {
+      clearTimeout(_timer);
+      _timer = null;
+    }
+
+    function _schedule() {
+      clearTimeout(_timer);
+      _timer = setTimeout(_tick, _interval);
+    }
+
+    function _tick() {
+      if (_paused) { _timer = null; return; }
+      if (Store.get().view !== 'lista') { _schedule(); return; }
+
+      var etag = Store.getEtag();
+      Api.sync(etag).then(function(res) {
+        if (!res.ok) {
+          // Backoff em falha
+          _interval = Math.min(_interval * POLL_BACKOFF_FACTOR, POLL_MAX_INTERVAL_MS);
+        } else {
+          _interval = POLL_INTERVAL_MS; // reset
+          if (res.data && !res.data.unchanged && res.data.cartoes) {
+            Store.set({ cartoes: res.data.cartoes, etag: res.data.etag });
+            Render.cartoesList();
+            Render.updateBadges(res.data.cartoes);
+            Render.updateKpiRow(res.data.cartoes);
+          }
+        }
+        _schedule();
+      });
+    }
+
+    function resetBackoff() { _interval = POLL_INTERVAL_MS; }
+
+    return { start, stop, resetBackoff };
+  })();
+
+  // ==========================================================================
+  // APP — Controlador principal + handlers de UI
+  // ==========================================================================
+  var _debouncedSearch = Utils.debounce(function(q) {
+    Store.set({ searchQuery: q });
+    Render.cartoesList();
+  }, DEBOUNCE_SEARCH_MS);
+
+  var App = {
+
+    // ---- INIT ----
+    init: function () {
+      // Esconde skeleton e mostra loading state
+      App._setHeaderBack(false);
+      App._setHeaderTitle('Cartões', '');
+
+      // Bootstrap (1 chamada para tudo)
+      Api.bootstrap().then(function(res) {
+        var sk = document.getElementById('initialSkeleton');
+        if (sk) sk.remove();
+
+        if (!res.ok) {
+          Toast.show('Erro ao carregar: ' + (res.error && res.error.message), 'error', 5000);
+          document.getElementById('mainContent').innerHTML =
+            '<div style="padding:40px;text-align:center;color:#64748b">'
+            + '<p>Erro ao conectar. <button onclick="location.reload()" style="color:#5B5FEF;border:none;background:none;cursor:pointer;font-weight:700;text-decoration:underline">Recarregar</button></p></div>';
+          return;
+        }
+
+        Store.set({
+          cartoes: res.data.cartoes || [],
+          etag:    res.data.etag,
+          view:    'lista'
+        });
+        Render.cartoesView();
+        Poll.start();
+      });
+    },
+
+    // ---- NAVEGAÇÃO ----
+    goBack: function () {
+      Store.set({ view: 'lista', cartaoDetalhe: null, faturas: [], kpis: null });
+      App._setHeaderBack(false);
+      App._setHeaderTitle('Cartões', '');
+      App._setHeaderActions(true);
+      Render.cartoesView();
+    },
+
+    openDetalhe: function (id) {
+      var cartao = Store.getCartoes().find(function(c) { return c.id === id; });
+      if (!cartao) return;
+
+      Store.set({ view: 'detalhe', cartaoDetalhe: cartao });
+      App._setHeaderTitle(cartao.nome, cartao.emissor);
+      App._setHeaderBack(true);
+      App._setHeaderActions(false);
+
+      // Renderiza detalhe com dados que já temos (faturas vazias por ora)
+      Render.detalheView(cartao, [], null);
+
+      // Carrega detalhe completo em segundo plano
+      var syncing = document.getElementById('syncIndicator');
+      if (syncing) syncing.style.display = 'flex';
+
+      Api.getDetalhe(id).then(function(res) {
+        if (syncing) syncing.style.display = 'none';
+        if (!res.ok) {
+          Toast.show('Erro ao carregar detalhe: ' + (res.error && res.error.message), 'error');
+          return;
+        }
+        Store.set({
+          cartaoDetalhe: res.data.cartao,
+          faturas:       res.data.faturas || [],
+          kpis:          res.data.kpis
+        });
+        Render.detalheView(res.data.cartao, res.data.faturas, res.data.kpis);
+      });
+    },
+
+    // ---- CARTÃO — Criar / Editar ----
+    openAddCard: function () {
+      Modal.open(Render.modalCartao(null));
+      App._setupMelhorDiaPreview();
+    },
+
+    openEditCard: function (id) {
+      var cartao = Store.getCartoes().find(function(c) { return c.id === id; });
+      if (!cartao) {
+        // Pode estar no detalhe
+        var det = Store.get().cartaoDetalhe;
+        if (det && det.id === id) cartao = det;
+      }
+      if (!cartao) return;
+      Modal.open(Render.modalCartao(cartao));
+      App._setupMelhorDiaPreview();
+    },
+
+    selectCor: function (cor, swatchEl) {
+      var inp = document.getElementById('fcCor');
+      if (inp) inp.value = cor;
+      // Atualiza visual
+      var all = document.querySelectorAll('.color-swatch');
+      all.forEach(function(s) { s.classList.remove('selected'); });
+      if (swatchEl) swatchEl.classList.add('selected');
+      // Atualiza custom swatch
+      var custom = document.querySelector('.custom-swatch');
+      if (custom) custom.style.background = cor;
+      // Preview input color
+      var colorInput = document.getElementById('fcCorCustom');
+      if (colorInput) colorInput.value = cor;
+    },
+
+    _setupMelhorDiaPreview: function () {
+      var diaF = document.getElementById('fcDiaFech');
+      if (!diaF) return;
+
+      function update() {
+        var v = parseInt(diaF.value) || 0;
+        var melhor = document.getElementById('melhorDiaVal');
+        if (melhor && v >= 1 && v <= 31) {
+          var md = v >= 28 ? 1 : v + 1;
+          melhor.textContent = 'Dia ' + md + ' de cada mês';
+        }
+      }
+      diaF.addEventListener('input', update);
+      update();
+    },
+
+    submitCartao: function (e) {
+      e.preventDefault();
+      var id      = document.getElementById('fcId')     ? document.getElementById('fcId').value : '';
+      var version = document.getElementById('fcVersion') ? parseInt(document.getElementById('fcVersion').value) : 1;
+      var nome    = document.getElementById('fcNome').value.trim();
+      var emissor = document.getElementById('fcEmissor').value.trim();
+      var bandeira= document.getElementById('fcBandeira').value;
+      var ult4    = document.getElementById('fcUlt4').value.trim();
+      var limT    = parseFloat(document.getElementById('fcLimTotal').value) || 0;
+      var limU    = parseFloat(document.getElementById('fcLimUsado').value) || 0;
+      var diaF    = parseInt(document.getElementById('fcDiaFech').value) || 0;
+      var diaV    = parseInt(document.getElementById('fcDiaVenc').value) || 0;
+      var cor     = document.getElementById('fcCor').value || '#5B5FEF';
+
+      // Validação client-side
+      var valid = true;
+      function setErr(elId, msg) {
+        var el = document.getElementById(elId);
+        if (el) el.textContent = msg;
+        if (msg) {
+          valid = false;
+          var input = document.getElementById(elId.replace('err','fc').charAt(0).toLowerCase() + elId.replace('err','fc').slice(1));
+          if (input) input.classList.add('invalid');
+        }
+      }
+      ['errNome','errEmissor','errBandeira','errLimTotal','errDiaFech','errDiaVenc'].forEach(function(id){
+        var el = document.getElementById(id);
+        if (el) el.textContent = '';
+      });
+      document.querySelectorAll('.form-field input').forEach(function(i){ i.classList.remove('invalid'); });
+
+      if (!nome)          { setErr('errNome',    'Campo obrigatório'); }
+      if (!emissor)       { setErr('errEmissor',  'Campo obrigatório'); }
+      if (!bandeira)      { setErr('errBandeira', 'Selecione uma bandeira'); }
+      if (limT <= 0)      { setErr('errLimTotal', 'Deve ser maior que zero'); }
+      if (diaF < 1 || diaF > 31) { setErr('errDiaFech', 'Dia inválido (1-31)'); }
+      if (diaV < 1 || diaV > 31) { setErr('errDiaVenc', 'Dia inválido (1-31)'); }
+
+      if (!valid) return;
+
+      var payload = { id, version, nome, emissor, bandeira, ult4, cor,
+                      limite_total: limT, limite_usado: limU,
+                      dia_fechamento: diaF, dia_vencimento: diaV };
+
+      // Optimistic UI — cria objeto enriquecido localmente
+      var optimisticCartao = Object.assign({}, payload, {
+        id:               id || ('temp_' + Date.now()),
+        ativo:            true,
+        pct_uso:          limT > 0 ? Math.round((limU / limT) * 100) : 0,
+        limite_disponivel: Math.max(0, limT - limU),
+        prox_fechamento:  '…',
+        prox_vencimento:  '…',
+        melhor_dia_compra: diaF >= 28 ? 1 : diaF + 1,
+        alerta_uso:       false,
+        alerta_vencimento:false,
+        dias_para_vencimento: 99,
+        version: version
+      });
+
+      Store.upsertCartao(optimisticCartao);
+      Render.cartoesList();
+      Modal.close();
+      Toast.show(id ? 'Atualizando cartão...' : 'Adicionando cartão...', 'info', 2000);
+
+      // Botão loading
+      var btn = document.getElementById('btnSalvarCartao');
+      if (btn) btn.classList.add('loading');
+
+      Api.saveCartao(payload).then(function(res) {
+        if (btn) btn.classList.remove('loading');
+
+        if (!res.ok) {
+          // Rollback
+          if (res.error && res.error.code === 'CONFLICT') {
+            // Conflito de versão: atualiza com dados do server
+            if (res.error.details && res.error.details.serverData) {
+              Store.upsertCartao(res.error.details.serverData);
+            } else {
+              // Remove optimistic se era criação
+              if (!id) Store.removeCartao(optimisticCartao.id);
+            }
+            Render.cartoesList();
+            Toast.show('Conflito: o cartão foi atualizado em outro lugar. Dados do servidor carregados.', 'warn', 6000);
+          } else {
+            // Rollback criação / restaura versão anterior
+            if (!id) Store.removeCartao(optimisticCartao.id);
+            Render.cartoesList();
+            Toast.show('Erro ao salvar: ' + (res.error && res.error.message), 'error', 5000);
+          }
+          return;
+        }
+
+        // Sucesso: substitui optimistic pelo real
+        Store.upsertCartao(res.data);
+        Render.cartoesList();
+        Render.updateBadges(Store.getCartoes());
+        Render.updateKpiRow(Store.getCartoes());
+        Poll.resetBackoff();
+        Toast.show(id ? 'Cartão atualizado!' : 'Cartão adicionado!', 'success');
+      });
+    },
+
+    // ---- ARQUIVAR / REATIVAR ----
+    toggleArchive: function (id, novoAtivo) {
+      var novoAtivoBool = novoAtivo === 'true' || novoAtivo === true;
+      var cartao = Store.getCartoes().find(function(c) { return c.id === id; });
+      if (!cartao) {
+        var det = Store.get().cartaoDetalhe;
+        if (det && det.id === id) cartao = det;
+      }
+      if (!cartao) return;
+
+      var label = novoAtivoBool ? 'reativado' : 'arquivado';
+
+      // Optimistic
+      var prev = Object.assign({}, cartao);
+      Store.upsertCartao(Object.assign({}, cartao, { ativo: novoAtivoBool }));
+      Render.cartoesList();
+      Render.updateBadges(Store.getCartoes());
+      Render.updateKpiRow(Store.getCartoes());
+
+      // Se estava no detalhe, volta para lista
+      if (Store.get().view === 'detalhe') {
+        App.goBack();
+      }
+
+      Api.archiveCartao(id, novoAtivoBool).then(function(res) {
+        if (!res.ok) {
+          // Rollback
+          Store.upsertCartao(prev);
+          Render.cartoesList();
+          Render.updateBadges(Store.getCartoes());
+          Toast.show('Erro ao ' + (novoAtivoBool ? 'reativar' : 'arquivar') + ': ' + (res.error && res.error.message), 'error');
+          return;
+        }
+        Store.upsertCartao(res.data);
+        Render.cartoesList();
+        Toast.show('Cartão ' + label + ' com sucesso!', 'success');
+      });
+    },
+
+    // ---- GERAR FATURA ----
+    openGerarFatura: function (cartaoId) {
+      var tpl = document.getElementById('tpl-modal-gerar-fatura');
+      if (!tpl) return;
+      var hoje = new Date();
+      var html = tpl.innerHTML
+        .replace(/{cartaoId}/g, Utils.esc(cartaoId))
+        .replace(/{anoAtual}/g,  hoje.getFullYear());
+      // Seleciona mês atual
+      Modal.open(html, null);
+      // Seleciona mês atual no select
+      requestAnimationFrame(function() {
+        var selMes = document.getElementById('gfMes');
+        if (selMes) selMes.value = hoje.getMonth() + 1;
+      });
+    },
+
+    submitGerarFatura: function (e) {
+      e.preventDefault();
+      var cartaoId = document.getElementById('gfCartaoId').value;
+      var mes      = parseInt(document.getElementById('gfMes').value);
+      var ano      = parseInt(document.getElementById('gfAno').value);
+
+      if (!cartaoId || !mes || !ano) return;
+
+      var btn = document.getElementById('btnGerarFatura');
+      if (btn) btn.classList.add('loading');
+
+      Api.gerarFatura(cartaoId, ano, mes).then(function(res) {
+        if (btn) btn.classList.remove('loading');
+        Modal.close();
+        if (!res.ok) {
+          Toast.show('Erro: ' + (res.error && res.error.message), 'error');
+          return;
+        }
+        if (res.data && !res.data.created) {
+          Toast.show('Fatura já existe para este período.', 'warn');
+        } else {
+          Toast.show('Fatura gerada!', 'success');
+        }
+        // Recarrega detalhe
+        if (Store.get().view === 'detalhe' && Store.get().cartaoDetalhe) {
+          App._reloadDetalhe(cartaoId);
+        }
+      });
+    },
+
+    // ---- PAGAR FATURA ----
+    openPagarFatura: function (faturaId) {
+      var tpl = document.getElementById('tpl-modal-pagar-fatura');
+      if (!tpl) return;
+
+      // Buscar dados da fatura no Store
+      var faturas = Store.get().faturas || [];
+      var fat = faturas.find(function(f) { return f.id_fatura === faturaId; });
+      var cartao = Store.get().cartaoDetalhe;
+      var cardId = (fat && fat.id_cartao) ? fat.id_cartao : (cartao ? cartao.id : '');
+      var anoRef = fat ? (fat.ano_ref || '') : '';
+      var mesRef = fat ? (fat.mes_ref || '') : '';
+      var valorTotal = fat ? (parseFloat(fat.valor_total) || parseFloat(fat.valor) || 0) : 0;
+      var valorPago = fat ? (parseFloat(fat.valor_pago) || 0) : 0;
+      var valorPendente = Math.max(0, valorTotal - valorPago);
+      var isParcial = fat && String(fat.status || '').toLowerCase() === 'parcial';
+
+      var title = (isParcial || valorPago > 0) ? 'Pagar restante da fatura' : 'Pagar fatura';
+
+      var html = tpl.innerHTML
+        .replace(/{faturaId}/g, Utils.esc(faturaId))
+        .replace(/{cardId}/g, Utils.esc(cardId))
+        .replace(/{anoRef}/g, Utils.esc(String(anoRef)))
+        .replace(/{mesRef}/g, Utils.esc(String(mesRef)))
+        .replace(/{valorPendente}/g, valorPendente > 0 ? valorPendente.toFixed(2) : '')
+        .replace(/{modalTitle}/g, Utils.esc(title))
+        .replace(/{hoje}/g, Utils.hoje());
+      Modal.open(html);
+
+      // Mostrar banner de parcial se já tem pagamento
+      if ((isParcial || valorPago > 0) && valorTotal > 0) {
+        var pct = Math.min(100, Math.round((valorPago / valorTotal) * 100));
+        var banner = document.getElementById('pfParcialBanner');
+        if (banner) {
+          banner.style.display = 'block';
+          banner.innerHTML =
+            '<div style="background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);border-radius:10px;padding:10px 14px;margin:0 16px 8px">' +
+              '<div style="font-size:.82rem;color:#fbbf24;font-weight:700;margin-bottom:6px">Pagamento parcial</div>' +
+              '<div style="display:flex;justify-content:space-between;font-size:.78rem;color:#8892a0;margin-bottom:4px">' +
+                '<span>Pago: <b style="color:#34d399">' + Utils.brl(valorPago) + '</b></span>' +
+                '<span>Total: ' + Utils.brl(valorTotal) + '</span>' +
+              '</div>' +
+              '<div style="height:6px;background:rgba(255,255,255,.1);border-radius:99px;overflow:hidden">' +
+                '<div style="height:100%;width:' + pct + '%;background:#fbbf24;border-radius:99px"></div>' +
+              '</div>' +
+              '<div style="font-size:.75rem;color:#f87171;font-weight:600;margin-top:4px;text-align:right">Pendente: ' + Utils.brl(valorPendente) + '</div>' +
+            '</div>';
+        }
+      }
+    },
+
+    submitPagarFatura: function (e) {
+      e.preventDefault();
+      var faturaId = document.getElementById('pfFaturaId').value;
+      var cardId   = document.getElementById('pfCardId').value;
+      var anoRef   = document.getElementById('pfAnoRef').value;
+      var mesRef   = document.getElementById('pfMesRef').value;
+      var dt       = document.getElementById('pfDtPagamento').value;
+      var amountEl = document.getElementById('pfAmount');
+      var valorPag = amountEl ? parseFloat(amountEl.value) : 0;
+
+      if (!cardId || !anoRef || !mesRef) return;
+      if (!valorPag || valorPag <= 0) { Toast.show('Informe o valor do pagamento', 'error'); return; }
+
+      var btn = document.getElementById('btnPagarFatura');
+      if (btn) btn.classList.add('loading');
+
+      // Optimistic: atualiza fatura na lista
+      var faturas = Store.get().faturas || [];
+      var fat = faturas.find(function(f) { return f.id_fatura === faturaId; });
+      var fatOrig = fat ? Object.assign({}, fat) : null;
+      if (fat) {
+        var totalAtual = parseFloat(fat.valor_total) || parseFloat(fat.valor) || 0;
+        var pagoAtual = parseFloat(fat.valor_pago) || 0;
+        var novoPago = pagoAtual + valorPag;
+        var novoSaldo = Math.max(0, totalAtual - novoPago);
+        var novoStatus = novoSaldo <= 0.01 ? 'Paga' : 'Parcial';
+        Store.upsertFatura(Object.assign({}, fat, {
+          status: novoStatus,
+          valor_pago: novoPago,
+          valor_mes: novoSaldo,
+          valor: novoSaldo,
+          dt_pagamento: novoSaldo <= 0.01 ? dt : ''
+        }));
+        var cartao = Store.get().cartaoDetalhe;
+        if (cartao) Render.detalheView(cartao, Store.get().faturas, Store.get().kpis);
+      }
+      Modal.close();
+
+      Api.pagarFaturaAtualSaldo(cardId, parseInt(anoRef), parseInt(mesRef), dt, '', valorPag).then(function(res) {
+        if (btn) btn.classList.remove('loading');
+        if (!res.ok) {
+          // Rollback
+          if (fatOrig) {
+            Store.upsertFatura(fatOrig);
+            var c = Store.get().cartaoDetalhe;
+            if (c) Render.detalheView(c, Store.get().faturas, Store.get().kpis);
+          }
+          Toast.show('Erro: ' + (res.error && res.error.message), 'error');
+          return;
+        }
+        // Recarregar detalhe para ter dados corretos
+        var cId = Store.get().cartaoDetalhe ? Store.get().cartaoDetalhe.id : cardId;
+        Api.getDetalhe(cId).then(function(detRes) {
+          if (detRes.ok && detRes.data) {
+            Store.set({
+              cartaoDetalhe: detRes.data.cartao,
+              faturas: detRes.data.faturas || [],
+              kpis: detRes.data.kpis
+            });
+            Render.detalheView(detRes.data.cartao, detRes.data.faturas || [], detRes.data.kpis);
+          }
+        });
+        var saldoRestante = (res.data && res.data.saldo_atual !== undefined) ? parseFloat(res.data.saldo_atual) : -1;
+        if (saldoRestante > 0.01) {
+          Toast.show('Pagamento de ' + Utils.brl(valorPag) + ' registrado! Pendente: ' + Utils.brl(saldoRestante), 'success');
+        } else {
+          Toast.show('Fatura paga integralmente!', 'success');
+        }
+      });
+    },
+
+    // ---- FILTROS ----
+    onSearch: function (q) {
+      _debouncedSearch(q);
+    },
+
+    filterStatus: function (status) {
+      Store.set({ filterStatus: status });
+      // Atualiza tabs
+      var ta = document.getElementById('tabAtivos');
+      var tb = document.getElementById('tabArquivados');
+      if (ta) { ta.classList.toggle('active', status === 'ativos');     ta.setAttribute('aria-selected', status === 'ativos'); }
+      if (tb) { tb.classList.toggle('active', status === 'arquivados'); tb.setAttribute('aria-selected', status === 'arquivados'); }
+      Render.cartoesList();
+    },
+
+    onSort: function (val) {
+      Store.set({ sortBy: val });
+      Render.cartoesList();
+    },
+
+    // ---- MODAL ----
+    closeModal: function (e) {
+      Modal.closeOnBackdrop(e);
+      if (!e) Modal.close();
+    },
+
+    // ---- DEBUG ----
+    toggleDebug: function () {
+      var dbg = !Store.get().debugMode;
+      Store.set({ debugMode: dbg });
+      var bar = document.getElementById('debugBar');
+      var btn = document.getElementById('btnDebug');
+      if (bar) bar.style.display = dbg ? 'block' : 'none';
+      if (btn) btn.style.opacity = dbg ? '1' : '0.35';
+    },
+
+    // ---- HELPERS INTERNOS ----
+    _setHeaderTitle: function (title, sub) {
+      var t = document.getElementById('headerTitle');
+      var s = document.getElementById('headerSubtitle');
+      if (t) t.textContent = title;
+      if (s) s.textContent = sub || '';
+    },
+
+    _setHeaderBack: function (show) {
+      var btn = document.getElementById('btnBack');
+      if (btn) {
+        btn.style.display = show ? 'flex' : 'none';
+        btn.classList.toggle('visible', show);
+      }
+    },
+
+    _setHeaderActions: function (show) {
+      var el = document.getElementById('headerActions');
+      if (el) el.style.visibility = show ? 'visible' : 'hidden';
+    },
+
+    _reloadDetalhe: function (cartaoId) {
+      Api.getDetalhe(cartaoId).then(function(res) {
+        if (!res.ok) return;
+        Store.set({ cartaoDetalhe: res.data.cartao, faturas: res.data.faturas || [], kpis: res.data.kpis });
+        Render.detalheView(res.data.cartao, res.data.faturas, res.data.kpis);
+      });
+    }
+  };
+
+  // ==========================================================================
+  // EXPÕE App globalmente (chamado pelos onclick nos templates)
+  // ==========================================================================
+  window.App = App;
+
+  // ==========================================================================
+  // BOOT quando DOM estiver pronto
+  // ==========================================================================
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() { App.init(); });
+  } else {
+    App.init();
+  }
+
+})();
+</script>

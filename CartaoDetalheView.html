@@ -1,0 +1,217 @@
+<!-- =============================================================================
+     CartaoDetalheView — Template HTML para detalhe do cartão
+     ============================================================================= -->
+<script id="tpl-detalhe-view" type="text/html">
+  <div class="detalhe-view" id="detalheView">
+
+    <!-- Hero visual do cartão -->
+    <div class="detalhe-hero" style="background: linear-gradient(135deg, {cor}, {corDark})">
+      <div class="hero-card-visual">
+        <div class="hero-top">
+          <div class="card-chip">
+            <svg width="32" height="26" viewBox="0 0 28 22" fill="none">
+              <rect width="28" height="22" rx="3" fill="#FFD700" opacity="0.9"/>
+              <line x1="0" y1="7" x2="28" y2="7" stroke="#B8860B" stroke-width="1"/>
+              <line x1="0" y1="15" x2="28" y2="15" stroke="#B8860B" stroke-width="1"/>
+              <line x1="10" y1="0" x2="10" y2="22" stroke="#B8860B" stroke-width="1"/>
+              <line x1="18" y1="0" x2="18" y2="22" stroke="#B8860B" stroke-width="1"/>
+            </svg>
+          </div>
+          <div class="hero-bandeira">{bandeiraSvg}</div>
+        </div>
+        <div class="hero-number">{ult4DisplayFull}</div>
+        <div class="hero-bot">
+          <span class="hero-nome">{nome}</span>
+          <span class="hero-emissor">{emissor}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- KPIs principais -->
+    <div class="kpis-grid" id="detalheKpis">
+      <div class="kpi-box">
+        <span class="kpi-box-label">Limite Total</span>
+        <span class="kpi-box-val">{limTotalFmt}</span>
+      </div>
+      <div class="kpi-box danger">
+        <span class="kpi-box-label">Utilizado</span>
+        <span class="kpi-box-val">{limUsadoFmt}</span>
+        <span class="kpi-box-pct">{pct_uso}%</span>
+      </div>
+      <div class="kpi-box ok">
+        <span class="kpi-box-label">Disponível</span>
+        <span class="kpi-box-val">{limDispFmt}</span>
+      </div>
+    </div>
+
+    <!-- Barra de progresso global -->
+    <div class="detalhe-progress-wrap">
+      <div class="progress-bar large" role="progressbar" aria-valuenow="{pct_uso}" aria-valuemin="0" aria-valuemax="100">
+        <div class="progress-fill {pctClass}" style="width:{pct_uso}%"></div>
+      </div>
+      <span class="progress-label">{pct_uso}% do limite utilizado</span>
+    </div>
+
+    <!-- Alertas inteligentes -->
+    <div id="detalheAlertas" class="detalhe-alertas">
+      {alertasHtml}
+    </div>
+
+    <!-- Datas importantes -->
+    <div class="section-card">
+      <h3 class="section-title">Datas importantes</h3>
+      <div class="dates-detail-grid">
+        <div class="date-detail-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+          </svg>
+          <div>
+            <span class="dd-label">Próx. Fechamento</span>
+            <span class="dd-val">{prox_fechamento}</span>
+          </div>
+        </div>
+        <div class="date-detail-item {alertVencClass}">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+          <div>
+            <span class="dd-label">Próx. Vencimento</span>
+            <span class="dd-val">{prox_vencimento}</span>
+            <span class="dd-sub">{diasParaVencTxt}</span>
+          </div>
+        </div>
+        <div class="date-detail-item melhor">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          <div>
+            <span class="dd-label">Melhor dia de compra</span>
+            <span class="dd-val">Todo dia {melhor_dia_compra}</span>
+            <span class="dd-sub">Compra logo após o fechamento</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Seção de faturas -->
+    <div class="section-card">
+      <div class="section-header">
+        <h3 class="section-title">Faturas</h3>
+        <button class="btn-secondary" onclick="App.openGerarFatura('{id}')" title="Gerar fatura do mês">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          Nova fatura
+        </button>
+      </div>
+
+      <div id="faturasList">
+        {faturasHtml}
+      </div>
+    </div>
+
+    <!-- Ações flutuantes -->
+    <div class="detalhe-fab-row">
+      <button class="btn-outline" onclick="App.openEditCard('{id}')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+        </svg>
+        Editar cartão
+      </button>
+      <button class="btn-outline danger" onclick="App.toggleArchive('{id}', {ativoInvert})">
+        {archiveIcon} {archiveLabel}
+      </button>
+    </div>
+
+  </div>
+</script>
+
+<!-- Template de item de fatura -->
+<script id="tpl-fatura-item" type="text/html">
+  <div class="fatura-item {statusClass}" data-id="{id_fatura}">
+    <div class="fatura-left">
+      <div class="fatura-mes">{mesAno}</div>
+      <div class="fatura-periodo">{dtInicio} → {dtFim}</div>
+      <div class="fatura-venc">Vence: {dtVencimento}</div>
+    </div>
+    <div class="fatura-right">
+      <div class="fatura-valor">{valorFmt}</div>
+      <div class="fatura-status-badge {statusClass}">{status}</div>
+      {pagarBtn}
+    </div>
+  </div>
+</script>
+
+<!-- Template do modal para gerar fatura -->
+<script id="tpl-modal-gerar-fatura" type="text/html">
+  <div class="modal-header">
+    <h2 id="modalTitle">Gerar fatura</h2>
+    <button class="modal-close" onclick="App.closeModal()" aria-label="Fechar">&times;</button>
+  </div>
+  <form id="formGerarFatura" class="modal-form" onsubmit="App.submitGerarFatura(event)" novalidate>
+    <input type="hidden" id="gfCartaoId" value="{cartaoId}">
+    <div class="form-grid">
+      <div class="form-field">
+        <label for="gfMes">Mês <span class="req">*</span></label>
+        <select id="gfMes" required>
+          <option value="1">Janeiro</option>
+          <option value="2">Fevereiro</option>
+          <option value="3">Março</option>
+          <option value="4">Abril</option>
+          <option value="5">Maio</option>
+          <option value="6">Junho</option>
+          <option value="7">Julho</option>
+          <option value="8">Agosto</option>
+          <option value="9">Setembro</option>
+          <option value="10">Outubro</option>
+          <option value="11">Novembro</option>
+          <option value="12">Dezembro</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label for="gfAno">Ano <span class="req">*</span></label>
+        <input type="number" id="gfAno" value="{anoAtual}" min="2020" max="2099" required>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn-ghost" onclick="App.closeModal()">Cancelar</button>
+      <button type="submit" class="btn-primary" id="btnGerarFatura">
+        <span class="btn-label">Gerar fatura</span>
+        <span class="btn-loading">Gerando...</span>
+      </button>
+    </div>
+  </form>
+</script>
+
+<!-- Template do modal para marcar fatura como paga -->
+<script id="tpl-modal-pagar-fatura" type="text/html">
+  <div class="modal-header">
+    <h2 id="modalTitle">{modalTitle}</h2>
+    <button class="modal-close" onclick="App.closeModal()" aria-label="Fechar">&times;</button>
+  </div>
+  <div id="pfParcialBanner" style="display:none"></div>
+  <form id="formPagarFatura" class="modal-form" onsubmit="App.submitPagarFatura(event)" novalidate>
+    <input type="hidden" id="pfFaturaId" value="{faturaId}">
+    <input type="hidden" id="pfCardId" value="{cardId}">
+    <input type="hidden" id="pfAnoRef" value="{anoRef}">
+    <input type="hidden" id="pfMesRef" value="{mesRef}">
+    <div class="form-grid">
+      <div class="form-field full-width">
+        <label for="pfAmount">Valor do pagamento (R$)</label>
+        <input type="number" id="pfAmount" step="0.01" min="0.01" placeholder="Valor total ou parcial" value="{valorPendente}" required>
+      </div>
+      <div class="form-field full-width">
+        <label for="pfDtPagamento">Data do pagamento</label>
+        <input type="date" id="pfDtPagamento" value="{hoje}" required>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn-ghost" onclick="App.closeModal()">Cancelar</button>
+      <button type="submit" class="btn-primary" id="btnPagarFatura">
+        <span class="btn-label">Confirmar pagamento</span>
+        <span class="btn-loading">Salvando...</span>
+      </button>
+    </div>
+  </form>
+</script>

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cartões de Crédito</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <?!= include('cartoes_styles') ?>
+</head>
+<body>
+
+  <div id="app">
+    <!-- Header fixo -->
+    <header class="app-header" id="appHeader">
+      <button class="header-back" id="btnBack" onclick="App.goBack()" aria-label="Voltar">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M19 12H5M12 5l-7 7 7 7"/>
+        </svg>
+      </button>
+      <div class="header-center">
+        <h1 class="header-title" id="headerTitle">Cartões</h1>
+        <span class="header-subtitle" id="headerSubtitle"></span>
+      </div>
+      <div class="header-actions" id="headerActions">
+        <button class="icon-btn" onclick="App.openAddCard()" title="Novo cartão" aria-label="Adicionar cartão">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="btnDebug" onclick="App.toggleDebug()" title="Debug" aria-label="Info debug" style="opacity:0.35">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Debug bar -->
+    <div id="debugBar" class="debug-bar" style="display:none">
+      <span id="dbgText">—</span>
+    </div>
+
+    <!-- Conteúdo principal (SPA — trocado pelo JS) -->
+    <main id="mainContent" class="main-content" role="main">
+      <!-- Skeleton inicial mostrado enquanto JS carrega -->
+      <div id="initialSkeleton" class="skeleton-wrapper">
+        <div class="skeleton-filter-bar">
+          <div class="skel skel-input"></div>
+          <div class="skel skel-btn"></div>
+        </div>
+        <div class="cards-grid">
+          <div class="skel-card"><div class="skel skel-card-top"></div><div class="skel skel-line"></div><div class="skel skel-line short"></div></div>
+          <div class="skel-card"><div class="skel skel-card-top"></div><div class="skel skel-line"></div><div class="skel skel-line short"></div></div>
+          <div class="skel-card"><div class="skel skel-card-top"></div><div class="skel skel-line"></div><div class="skel skel-line short"></div></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Toast -->
+  <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- Modal backdrop -->
+  <div id="modalBackdrop" class="modal-backdrop" style="display:none" onclick="App.closeModal(event)" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div id="modalContent" class="modal-content" onclick="event.stopPropagation()">
+    </div>
+  </div>
+
+  <!-- Templates HTML (scripts incluídos via server-side) -->
+  <?!= include('CartoesView') ?>
+  <?!= include('CartaoDetalheView') ?>
+  <?!= include('cartoes_scripts') ?>
+
+</body>
+</html>
